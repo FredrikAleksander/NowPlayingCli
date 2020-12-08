@@ -2,7 +2,9 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using Windows.Media;
 using Windows.Media.Control;
 
@@ -43,7 +45,37 @@ namespace NowPlayingCli
             writer.WriteLine($"    -t,--type <video|music>   Add playback type to list of types that is desired");
             writer.WriteLine($"    -m,--icon-music <ICON>    Use ICON as the icon for music playback");
             writer.WriteLine($"    -v,--icon-video <ICON>    Use ICON as the icon for video playback");
+            writer.WriteLine($"    -d,--listen     <PORT>    Instead of printing to the console, listen \n" +
+                             $"                              for TCP connections on <PORT>, printing media\n" +
+                             $"                              information, then closing the connection\n");
             writer.WriteLine($"  And PROGRAMS is a list of executables to listen to media events from (defaults to spotify.exe)");
+        }
+
+        static int Listen(int port, Func<string> callback)
+        {
+            var listener = TcpListener.Create(port);
+
+            try
+            {
+                listener.Start();
+
+                while (true)
+                {
+                    var handler = listener.AcceptSocket();
+                    byte[] msg = Encoding.UTF8.GetBytes(callback());
+
+                    handler.Send(msg);
+                    handler.Shutdown(SocketShutdown.Both);
+                    handler.Close();
+                }
+
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.ToString());
+            }
+
+            return 0;
         }
 
         static int Main(string[] args)
@@ -56,6 +88,8 @@ namespace NowPlayingCli
             var videoSymbol = "🎬";
             var musicSymbol = "🎵";
 
+            int? listenPort = null;
+
             var userPrograms = new List<string>();
             var userPlaybackTypes = new List<MediaPlaybackType>();
 
@@ -67,6 +101,29 @@ namespace NowPlayingCli
                     {
                         PrintUsage(programName, Console.Out);
                         return 0;
+                    }
+                    else if (args[i] == "-d" || args[i] == "--listen")
+                    {
+                        if (args.Length > i + 1)
+                        {
+                            if(int.TryParse(args[i+1], out var result))
+                            {
+                                listenPort = result;
+                            }
+                            else
+                            {
+                                Console.Error.WriteLine($"Not a valid port: {args[i+1]}");
+                                PrintUsage(programName, Console.Error);
+                                return 1;
+                            }
+                            i++;
+                        }
+                        else
+                        {
+                            Console.Error.WriteLine($"Incomplete parameter: {args[i]}");
+                            PrintUsage(programName, Console.Error);
+                            return 1;
+                        }
                     }
                     else if (args[i] == "-m" || args[i] == "--icon-music")
                     {
@@ -140,15 +197,30 @@ namespace NowPlayingCli
             IEnumerable<MediaPlaybackType> playbackTypes = userPlaybackTypes.Count > 0 ? (IEnumerable<MediaPlaybackType>)userPlaybackTypes : defaultPlaybackTypes;
 
             var sessionManager = GlobalSystemMediaTransportControlsSessionManager.RequestAsync().GetAwaiter().GetResult();
-            var currentSession = sessionManager.GetCurrentSession();
-            if (programs.Contains(currentSession?.SourceAppUserModelId.ToLower()))
+            Func<string> printer = () =>
             {
-                var mediaProperties = currentSession.TryGetMediaPropertiesAsync().GetAwaiter().GetResult();
-                if (mediaProperties?.PlaybackType.HasValue == true && playbackTypes.Contains(mediaProperties.PlaybackType.Value))
+                var currentSession = sessionManager.GetCurrentSession();
+                if (programs.Contains(currentSession?.SourceAppUserModelId.ToLower()))
                 {
-                    Console.WriteLine(PrintMediaProperties(mediaProperties, videoSymbol, musicSymbol));
+                    var mediaProperties = currentSession.TryGetMediaPropertiesAsync().GetAwaiter().GetResult();
+                    if (mediaProperties?.PlaybackType.HasValue == true && playbackTypes.Contains(mediaProperties.PlaybackType.Value))
+                    {
+                        return PrintMediaProperties(mediaProperties, videoSymbol, musicSymbol);
+                    }
                 }
+                return "";
+            };
+
+            if (listenPort.HasValue)
+            {
+                Console.WriteLine($"Listening for requests on port: {listenPort.Value}");
+                Listen(listenPort.Value, printer);
             }
+            else
+            {
+                Console.WriteLine(printer());
+            }
+
             return 0;
         }
     }
